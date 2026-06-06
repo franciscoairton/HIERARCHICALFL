@@ -1,33 +1,39 @@
-# Quickstart PyTorch HFL Aligned with the SPN Model
+# Quickstart PyTorch HFL
 
-This project runs a Flower/PyTorch simulation following the hierarchical logic:
+This project runs a Flower/PyTorch simulation adapted for Hierarchical Federated Learning (HFL), following the communication flow:
 
 ```text
 cloud -> clients -> edges -> cloud
 ```
 
-This version was adjusted to align with the described SPN model:
+The implementation extends the traditional Flower federated learning workflow by adding an intermediate edge layer between the clients and the cloud server. In this version, clients do not send their updates directly to the cloud for global aggregation. Instead, each client sends its trained weights to an assigned edge server. Each edge aggregates the updates from its clients and then forwards a single aggregated update to the cloud.
 
-1. The cloud initializes the model.
-2. The cloud selects the clients.
-3. The cloud sends the model to the clients.
-4. Each client trains locally.
-5. Each client sends its weights to the corresponding edge.
-6. Each edge waits for `CLIENTS / EDGES` clients.
-7. Each edge aggregates the weights of its clients into a single update.
-8. Each edge sends one aggregated update to the cloud.
-9. The cloud waits for all `EDGES`.
+The general workflow is:
+
+1. The cloud initializes the global model.
+2. The cloud selects the clients for the current round.
+3. The cloud sends the model to the selected clients.
+4. Each client trains the model locally.
+5. Each client sends its trained weights to the assigned edge.
+6. Each edge waits for the updates from its group of clients.
+7. Each edge aggregates the client updates into a single edge update.
+8. Each edge sends its aggregated update to the cloud.
+9. The cloud waits for all edge updates.
 10. The cloud aggregates the edge updates and completes the round.
 
-## Important Difference in This Version
+## Main Difference from Traditional Flower FedAvg
 
-This version does not only record edge events. The model aggregation is also hierarchical:
+In the traditional Flower FedAvg workflow, the cloud receives and aggregates the updates directly from all selected clients.
+
+In this adapted HFL version, aggregation happens in two levels:
 
 ```text
 clients -> edge aggregation -> cloud aggregation
 ```
 
-In other words, the cloud no longer performs a direct FedAvg over all clients. First, each edge aggregates its group of clients. Then, the cloud aggregates the models received from the edges.
+This means that the cloud no longer performs FedAvg directly over all individual client updates. First, each edge aggregates the updates from its assigned clients. Then, the cloud aggregates the models received from the edges.
+
+This behavior makes the simulation closer to an HFL scenario, where edge servers act as intermediate aggregation points between clients and the central server.
 
 ## Main Configuration
 
@@ -48,11 +54,20 @@ batch-size = 32
 log-dir = "logs"
 ```
 
-* `num-supernodes`: total number of clients available in Flower.
-* `num-selected-clients`: number of clients selected per round.
-* `num-edges`: number of logical edges.
-* `num-selected-clients` must be divisible by `num-edges`.
-* `clients_per_edge = num-selected-clients / num-edges`.
+* `num-supernodes`: total number of clients available in the Flower simulation.
+* `num-selected-clients`: number of clients selected per training round.
+* `num-evaluate-clients`: number of clients used for federated evaluation.
+* `num-edges`: number of logical edge servers.
+* `local-epochs`: number of local training epochs per client.
+* `learning-rate`: learning rate used during local training.
+* `batch-size`: batch size used by the clients.
+* `log-dir`: directory where the timing logs are stored.
+
+The value of `num-selected-clients` must be divisible by `num-edges`.
+
+```text
+clients_per_edge = num-selected-clients / num-edges
+```
 
 Example:
 
@@ -62,16 +77,16 @@ num-edges = 2
 clients_per_edge = 5
 ```
 
-Therefore:
+Therefore, the clients are distributed across the edges as follows:
 
 ```text
 edge 0: clients 0, 1, 2, 3, 4
 edge 1: clients 5, 6, 7, 8, 9
 ```
 
-## Running
+## Running the Project
 
-It is recommended to use `python -m flwr` to avoid errors caused by a virtual environment pointing to another Python installation.
+It is recommended to use `python -m flwr` to avoid errors caused by a virtual environment pointing to a different Python installation.
 
 ```powershell
 python -m pip install -U pip
@@ -80,6 +95,8 @@ python -m pip install -U "flwr[simulation]" torch torchvision datasets "flwr-dat
 python -m flwr federation simulation-config --num-supernodes 10 local
 python -m flwr run . local --stream
 ```
+
+The number passed to `--num-supernodes` should match the `num-supernodes` value defined in `pyproject.toml`.
 
 ## Cleaning Logs and Processes on Windows
 
@@ -93,6 +110,8 @@ Remove-Item -Recurse -Force logs
 
 ## Generated Files
 
+After running the simulation, the project generates timing logs and compiled summaries:
+
 ```text
 logs/fl_timing_exec_001.csv
 logs/fl_timing_exec_002.csv
@@ -101,40 +120,15 @@ logs/compiled_with_warmup.csv
 logs/model_parameters_for_spn.csv
 ```
 
-## Most Important File for Filling the SPN Model
+The files `fl_timing_exec_001.csv`, `fl_timing_exec_002.csv`, and `fl_timing_exec_003.csv` store the timing events for each execution.
 
-Use this file:
+The file `compiled_with_warmup.csv` contains the compiled timing summary across executions.
 
-```text
-logs/model_parameters_for_spn.csv
-```
+The file `model_parameters_for_spn.csv` is generated as an additional output for users who want to reuse the measured times in analytical models.
 
-It contains only the parameters that should be inserted into the model:
+## Timing Logs
 
-```text
-IM
-SC
-ECS
-T
-EPPE
-AGE
-EC
-AGC
-TARGET_ROUND
-```
-
-The `ECS` parameter is calculated as a calibrated residual:
-
-```text
-ECS = average_reconstructed_hfl_round_time_with_warmup
-      - (SC + T + EPPE + AGE + EC + AGC)
-```
-
-This avoids directly using the raw `envia_para_clientes` value from Flower/Ray, which may not represent exactly the same concept as in the SPN model.
-
-## Log Interpretation
-
-The main stages are:
+The main stages recorded in the logs are:
 
 ```text
 inicializa_modelo
@@ -149,7 +143,11 @@ cloud_recebe_edges
 agregacao_de_edges_na_cloud
 ```
 
-The reconstructed total used for comparison with the SPN follows:
+These stages make it possible to analyze the time spent in the main parts of the HFL workflow, including client training, client-to-edge communication, edge aggregation, edge-to-cloud communication, and cloud aggregation.
+
+## Interpreting the HFL Timing Flow
+
+The reconstructed HFL round time follows the hierarchical execution logic:
 
 ```text
 seleciona_clientes
@@ -162,4 +160,10 @@ seleciona_clientes
 + agregacao_de_edges_na_cloud
 ```
 
-The `tempo_wallclock_medio_strategy_start_com_warmup` value is only a Flower/Ray diagnostic metric. It includes runtime overheads, scheduling, loading, and other costs that should not be directly summed into the SPN parameters.
+This calculation considers that clients assigned to the same edge may execute in parallel or in overlapping waves. Therefore, the total time does not simply sum the training time of all clients sequentially.
+
+The `tempo_wallclock_medio_strategy_start_com_warmup` value is kept as a diagnostic metric from Flower/Ray. It may include runtime overheads, scheduling, loading, and other internal costs. For this reason, it should be interpreted as an execution-level diagnostic value rather than as a direct sum of the individual HFL stages.
+
+## Notes
+
+This version is intended to provide a practical HFL adaptation of Flower/PyTorch. It can be used to study hierarchical aggregation, compare traditional FL and HFL workflows, and collect timing information from each stage of the federated learning process.
